@@ -1,0 +1,51 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+echo "<------------------------------------------------->"
+echo
+echo "<------------------------------------------------->"
+echo "cronjob running on $(date)"
+echo "Running cloudflare-dyndns-updater..."
+
+echo -e "Variables set:\\n\
+CLOUDFLARE_HOSTED_DOMAINS=${CLOUDFLARE_HOSTED_DOMAINS}\\n\
+CLOUDFLARE_PROXY=${CLOUDFLARE_PROXY:-false}\\n"
+
+# assume dns_cloudflare_api_token is used.
+export CF_API_TOKEN=$(cat /config/dns-conf/cloudflare.ini | grep '^dns_cloudflare_api_token' | cut -d'=' -f2- | xargs)
+
+# if not, setup dns_cloudflare_email and dns_cloudflare_api_key
+if [[ -n "CF_API_TOKEN" ]]; then 
+    export CF_API_KEY=$(cat /config/dns-conf/cloudflare.ini | grep '^dns_cloudflare_api_key' | cut -d'=' -f2- | xargs)
+    export CF_API_EMAIL=$(cat /config/dns-conf/cloudflare.ini | grep '^dns_cloudflare_email' | cut -d'=' -f2- | xargs)
+fi
+
+# de-construct comma separated domains into array
+DOM_LIST=($(echo ${CLOUDFLARE_HOSTED_DOMAINS} | tr "," " "))
+
+# check your current public ip
+PUBLIC_IP=\"$(curl -Ls https://api.ipify.org/ || curl -L https://ipv4.icanhazip.com/)\"
+
+# loop given domains and update cloudflare ddns, only support type A record
+for EACH_DOMAIN in "${DOM_LIST[@]}"
+do
+    printf "\n"
+    echo "Checking Cloudflare for ${EACH_DOMAIN}..."
+    # get current cloudflare's configure ip address for domain into tmp file.
+    flarectl --json d l ${EACH_DOMAIN} | jq '.[] | select(.Type == "A")' > /tmp/dns-query || continue
+
+    # if public ip match, ignore. else update the new public ip to domain's type A record
+    if [[ ! ${PUBLIC_IP} == $(jq '.Content' /tmp/dns-query) ]]; then
+        echo "Current IP is ${PUBLIC_IP}, but DDNS reflect $(jq '.Content' /tmp/dns-query), updating..."
+        flarectl d d --zone=${EACH_DOMAIN} --id=$(jq '.ID' /tmp/dns-query | tr -d '"')
+        flarectl d c --zone=${EACH_DOMAIN} --name=@ \
+        --proxy=${CLOUDFLARE_PROXY} \
+        --type=A \
+        --content=$(echo ${PUBLIC_IP} | tr -d '"')
+        echo "DDNS updated, see details above."
+    else
+        echo "DDNS is up-to-date, ${PUBLIC_IP} on $(date -R)"
+    fi 
+done
+
+echo "<------------------COMPLETED---------------------->"
