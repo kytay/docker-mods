@@ -1,0 +1,87 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+echo -e "Variables set:\\n\
+EMAIL=${EMAIL}\\n\
+STAGING=${STAGING}\\n\
+DNSPLUGIN=${DNSPLUGIN}\\n\
+CLOUDFLARE_HOSTED_DOMAINS=${CLOUDFLARE_HOSTED_DOMAINS}\\n\
+USER_HOSTNAME=${USER_HOSTNAME}\\n"
+
+RSA_KEY_SIZE=4096
+
+# Request for letsencrypt cert for each domain, e.g abc.com,xyz.com,somedomain.com
+DOM_LIST=($(echo ${CLOUDFLARE_HOSTED_DOMAINS} | tr "," " "))
+
+# Check if cloudflare.ini exist
+if [[ -f /config/dns-conf/cloudflare.ini ]]; then
+    export CF_API_TOKEN=$(cat /config/dns-conf/cloudflare.ini | grep '^dns_cloudflare_api_token' | cut -d'=' -f2- | xargs)
+    export CF_API_KEY=$(cat /config/dns-conf/cloudflare.ini | grep '^dns_cloudflare_api_key' | cut -d'=' -f2- | xargs)
+    export CF_API_EMAIL=$(cat /config/dns-conf/cloudflare.ini | grep '^dns_cloudflare_email' | cut -d'=' -f2- | xargs)
+fi
+
+# Check if dns_cloudflare_email and dns_cloudflare_api_key is updated from default
+if [[ -n "${CF_API_KEY}" && -n "${CF_API_EMAIL}" && ${CF_API_EMAIL} == 'cloudflare@example.com' ]]; then
+    echo "System default configuration for /config/dns-conf/cloudflare.ini is found. 
+    Update 'dns_cloudflare_email' and 'dns_cloudflare_api_key' accordingly, or comment them out if using 'dns_cloudflare_api_token'.
+    'cloudflare-multtdomain-ssl' will not work, skipping ssl generation."
+    exit 0
+fi
+
+# Check if dns_cloudflare_api_token exist
+if [[ -z "${CF_API_TOKEN}" && -z "${CF_API_KEY}" && -z "${CF_API_EMAIL}" ]]; then
+    echo "No 'dns_cloudflare_api_token' found in /config/dns-conf/cloudflare.ini. 
+    'cloudflare-multtdomain-ssl' will not work, skipping ssl generation."
+    exit 0
+fi
+
+for each_domain in "${DOM_LIST[@]}"
+do
+  if [ "${USER_HOSTNAME}" == "@" ]
+  then
+    DOMAIN_CERT=${each_domain}
+    WILDCARD_CERT=*.${each_domain}
+  else
+    DOMAIN_CERT=${USER_HOSTNAME}.${each_domain}
+    WILDCARD_CERT=*.${USER_HOSTNAME}.${each_domain}
+  fi
+
+  cert_expiry=$(certbot certificates --cert-name ${DOMAIN_CERT} | grep Expiry | awk '{print $3}')
+  within_next_5_days=$(date --rfc-3339=date -d "+5 days")
+
+  if [[ "$within_next_5_days" > "$cert_expiry" ]]
+  then
+
+    if [ "$STAGING" = "true" ]
+    then
+        STAGING_OPT="--staging"
+    else
+        STAGING_OPT=""
+    fi
+
+    printf "\n\nStart request-cert for ${DOMAIN_CERT}\n"
+
+    certbot certonly -n --agree-tos \
+    -m ${EMAIL} \
+    --cert-name ${DOMAIN_CERT} \
+    -d ${DOMAIN_CERT} \
+    -d ${WILDCARD_CERT} \
+    --dns-cloudflare \
+    --dns-cloudflare-credentials /config/dns-conf/cloudflare.ini \
+    --rsa-key-size ${RSA_KEY_SIZE} \
+    ${STAGING_OPT}
+  else
+    echo "Valid cert for ${DOMAIN_CERT} exist. Abort request for new cert."
+  fi
+
+  # Build bundle after certs received.
+  printf "\n\nGenerating cert bundle for ${DOMAIN_CERT}\n"
+
+  rm -f "/etc/letsencrypt/live/${DOMAIN_CERT}/priv-fullchain-bundle.pem" && echo -n -e '.\r'
+  cat "/etc/letsencrypt/live/${DOMAIN_CERT}/fullchain.pem" | tee "/etc/letsencrypt/live/${DOMAIN_CERT}/priv-fullchain-bundle.pem" > /dev/null && echo -n -e '..\r'
+  cat "/etc/letsencrypt/live/${DOMAIN_CERT}/privkey.pem" | tee -a "/etc/letsencrypt/live/${DOMAIN_CERT}/priv-fullchain-bundle.pem" > /dev/null && echo -n -e '...\r'
+  chmod 0644 "/etc/letsencrypt/live/${DOMAIN_CERT}/priv-fullchain-bundle.pem"  && echo -n -e '....\r'
+  chmod 0655 "/etc/letsencrypt/live/"  && echo -n -e '....\r'
+done
+
+exit 0
